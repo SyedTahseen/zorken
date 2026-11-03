@@ -1,71 +1,54 @@
-# Zorken (LSPosed module + app) - v1.0.0
+<p align="center">
+  <img src="docs/banner.png" alt="Zorken - Your privacy, on autopilot" width="100%">
+</p>
 
-Hides selected apps and files after N wrong phone-unlock attempts. Restore only from this app with your secret PIN.
-A correct phone unlock restores nothing.
+<p align="center">
+  <a href="https://github.com/syedtahseen/zorken/releases/tag/latest"><img src="https://img.shields.io/badge/Download-APK-D2F234?style=for-the-badge&labelColor=000000" alt="Download APK"></a>
+  <img src="https://img.shields.io/badge/Android-11%2B-D2F234?style=for-the-badge&labelColor=000000" alt="Android 11+">
+  <img src="https://img.shields.io/badge/Needs-LSPosed-D2F234?style=for-the-badge&labelColor=000000" alt="Needs LSPosed">
+  <img src="https://img.shields.io/badge/Version-1.0.0-D2F234?style=for-the-badge&labelColor=000000" alt="Version 1.0.0">
+</p>
 
-## Setup
-1. Build the APK (Android Studio, or push to GitHub: Actions -> latest run -> Artifacts, or Releases -> "Latest build").
-2. Install it, enable the module in LSPosed (scope: **System Framework**), reboot.
-3. Open the app, set a secret PIN (not your phone lock PIN), choose apps, add folders/files, set the attempt limit.
-4. Grant **All files access** (needed to hide files). Allow notifications (progress). No root needed.
-5. Recommended: disable battery optimization for Zorken. Unlock the app once after installing so the lock key is created.
+## What is Zorken?
 
-## How it works
-- **Wrong attempts** are counted by the module inside system_server. At the limit it hides the apps and asks the app to hide the files.
-- **Hide files**: each item is moved instantly into the hidden `.zorken` folder at the root of its storage volume.
-  The module delivers this request with a temporary Android allowlist and puts the app on the battery-optimization allowlist,
-  so the locking below can start in the background even though nobody opened the app.
-- **Lock**: a foreground service (`LockService`, notification with progress) encrypts the item into `.zorken/<id>.<n>.zk`
-  (AES-256-GCM, fresh key per container). It works in small steps (up to ~256 MB each, a big file gets its own container):
-  each container is verified before the plain files it holds are deleted, so an interruption never loses progress and
-  the next run continues with what is left. Free space needed is about one file, not the whole item.
-  If Android refuses to start the service, a JobScheduler job (`EncryptJob`) does the same work.
-- **Restore**: also runs in the foreground service (notification + progress). The app stays on "Hidden" until it is done;
-  if interrupted, swipe to restore again. A container is deleted only after everything in it is back; existing files are never overwritten.
-- **Progress bars** show hiding (items), locking (bytes written + verified) and restoring (bytes) on the main screen and in the notification.
-- Locking needs no PIN. Unlocking needs the PIN **and** a device secret kept by the module (`/data/system/zk_config`),
-  so copying `.zorken` off the phone is not enough to brute-force a short PIN. A copy of the key bundle (`.zorken/.keys`) stays next to the files so a reinstall keeps working.
+Zorken protects your private apps and files from people who get hold of your phone.
 
-## Settings survive reinstall / update
-The module keeps PIN hash, apps, folders, attempt limit and device secret in `/data/system/zk_config`, which uninstalling the app does not touch.
-After a reinstall the app shows "Saved settings found - enter your PIN to restore them".
-After updating the APK, **reboot once** when the status card says "older version" so the new module code loads
-(module protocol version 4; changes that only touch the app need no reboot).
+You choose how many wrong unlock attempts are allowed. If someone goes over the limit, Zorken **hides your chosen apps** and **locks your chosen folders and files in an encrypted vault**. Only you can bring them back, with your secret PIN inside the app.
 
-## Recovery
-- Something breaks: disable the module in LSPosed and reboot.
-- Forgot PIN: with root delete `/data/system/zk_config`, reboot, reinstall the app. Files that were already locked cannot be opened without that secret.
-- Files stuck as plain files in `.zorken` (interrupted locking): open the app (it resumes) or swipe to restore.
+<p align="center">
+  <img src="docs/how-it-works.png" alt="How Zorken works" width="100%">
+</p>
 
-## UI
-Flat list layout with a lime accent and a corner glow. Icons are vector drawables in `res/drawable` (`ic_*.xml`).
-Optional: put a font at `app/src/main/assets/fonts/ui.ttf` (e.g. Outfit or Sora) and the whole UI uses it; without it the system font is used.
+## Features
 
-## Source layout (`app/src/main/java/com/zorken`)
-| File | Role |
+| | |
 |---|---|
-| `Hook.java` | Module, runs in system_server: counts wrong attempts, hides apps, stores config, answers the app |
-| `MainActivity.java` | UI: PIN screens, status, cards, progress bar |
-| `Shell.java` | Hide/restore/lock logic, path rules, progress tracking |
-| `Vault.java` | Pure-Java encryption (key bundle, containers, chunked AES-GCM) |
-| `LockService.java` | Foreground service: locking and restoring |
-| `AppLog.java` | One persistent log (`files/zorken.log`, ~256 KB cap) shown on the **Logs** card: hide/lock/restore, module events, settings, crashes |
-| `ZorkenApp.java` | Writes app crashes to the log |
-| `EncryptJob.java` | Fallback job for locking; `schedule()` starts the service first |
-| `FileReceiver.java` | Receives the module's answers and the "hide files" request |
-| `Common.java` | Shared helpers and the module protocol version |
+| **Hide apps** | Pick any apps. They disappear from your phone when the limit is reached. |
+| **Lock files and folders** | Chosen items are moved into a hidden vault and encrypted. |
+| **Secret PIN** | A separate PIN, different from your phone lock, is the only way to restore. |
+| **Safe by design** | A correct phone unlock never restores anything. Hiding needs no PIN, restoring does. |
+| **Your limit** | Choose 1 to 10 wrong attempts before Zorken acts. |
+| **Swipe to hide or restore** | One swipe, with live progress in the app and in a notification. |
+| **Hide the app icon** | Remove Zorken from your launcher, and open it from LSPosed when you need it. |
+| **Survives reinstall** | Your settings are kept, so updating or reinstalling is painless. |
 
-## Automatic builds
-Every push builds the APK with GitHub Actions and signs it with a key kept in the Actions cache.
-If that cache is ever evicted you must uninstall the old app before installing a new one.
+## Get started
 
-## Hide app icon
-Settings > **Hide app icon** (Off / On pill) disables the launcher alias (`.LauncherAlias`). Open Zorken afterwards from LSPosed > Modules > Zorken (module settings),
-then switch it off to bring the icon back. Reinstalling the app also brings the icon back.
+1. **Download** the APK from [Releases](https://github.com/syedtahseen/zorken/releases/tag/latest) and install it.
+2. Open **LSPosed**, enable the **Zorken** module with scope **System Framework**, then **reboot**.
+3. Open Zorken and **create your PIN**.
+4. Choose your **apps** and **folders or files**, and set your **wrong attempts** limit.
+5. Allow **All files access** and **notifications** when asked.
 
-## Logs
-The **Logs** card (newest first, Refresh / Copy / Clear) lists everything the app did. Module events (wrong attempts, apps hidden/shown) are sent
-by the hook, so they appear after one reboot following the update.
+Tip: turn off battery optimization for Zorken so locking is never interrupted.
 
-## Display size
-The **Display size** card scales the app's own interface (70%-140%, 10% steps) with a -/+ pill. It does not change the phone's DPI.
+## Good to know
+
+- **There is no PIN recovery.** Files that are already locked cannot be opened without your PIN, so remember it.
+- **Something wrong?** The status card on the home screen tells you what to fix, and the **Logs** section shows what happened.
+- **App icon hidden?** Open Zorken from LSPosed, then Modules, then Zorken.
+- **After an update,** reboot once if the status card says the module is an older version.
+
+## Found a bug?
+
+Open the menu in the app and tap **Bug report**, or [create an issue](https://github.com/syedtahseen/zorken/issues/new).
