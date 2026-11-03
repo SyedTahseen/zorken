@@ -1,0 +1,18 @@
+plugins { id 'com.android.application' }
+android {
+    namespace 'com.zorken'
+    compileSdk 34
+    defaultConfig { applicationId 'com.zorken'; minSdk 30; targetSdk 34; versionCode 14; versionName '1.0.0' }
+    signingConfigs {
+        stable {
+            if (file('stable.keystore').exists()) {
+                storeFile file('stable.keystore'); storePassword 'android'; keyAlias 'zk'; keyPassword 'android'
+            }
+        }
+    }
+    buildTypes {
+        debug { if (file('stable.keystore').exists()) signingConfig signingConfigs.stable }
+    }
+    compileOptions { sourceCompatibility JavaVersion.VERSION_1_8; targetCompatibility JavaVersion.VERSION_1_8 }
+}
+dependencies { compileOnly 'de.robv.android.xposed:api:82' }

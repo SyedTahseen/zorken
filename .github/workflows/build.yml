@@ -1,0 +1,70 @@
+name: Build APK
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Accept Android SDK licenses
+        run: yes | "$ANDROID_HOME"/cmdline-tools/*/bin/sdkmanager --licenses > /dev/null || true
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.5'
+
+      - name: Restore signing key
+        id: key
+        uses: actions/cache@v4
+        with:
+          path: app/stable.keystore
+          key: zk-signing-key-v1
+
+      - name: Create signing key (first run only)
+        if: steps.key.outputs.cache-hit != 'true'
+        run: |
+          keytool -genkeypair -keystore app/stable.keystore -storepass android -keypass android \
+            -alias zk -keyalg RSA -keysize 2048 -validity 36500 -dname "CN=Zorken"
+
+      - name: Build debug APK
+        run: gradle assembleDebug --console=plain
+
+      - name: Rename APK
+        run: cp app/build/outputs/apk/debug/app-debug.apk Zorken.apk
+
+      - uses: actions/upload-artifact@v7
+        with:
+          path: Zorken.apk
+          archive: false
+
+      - name: Move "latest" tag
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+        run: |
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git tag -f latest
+          git push -f origin latest
+
+      - name: Publish release
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: Latest build
+          prerelease: true
+          files: Zorken.apk
+          body: Automatic build of commit ${{ github.sha }}
