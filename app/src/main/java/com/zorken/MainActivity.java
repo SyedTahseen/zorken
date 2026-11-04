@@ -293,7 +293,18 @@ public class MainActivity extends Activity {
             @Override protected void onMeasure(int w, int h) {
                 super.onMeasure(w, View.MeasureSpec.makeMeasureSpec(max, View.MeasureSpec.AT_MOST));
             }
+            // Keep the outer page scroller from stealing vertical drags while this box can still scroll.
+            @Override public boolean dispatchTouchEvent(MotionEvent e) {
+                int a = e.getActionMasked();
+                if (a == MotionEvent.ACTION_DOWN || a == MotionEvent.ACTION_MOVE) {
+                    boolean can = canScrollVertically(-1) || canScrollVertically(1);
+                    if (getParent() != null) getParent().requestDisallowInterceptTouchEvent(can);
+                }
+                return super.dispatchTouchEvent(e);
+            }
         };
+        v.setNestedScrollingEnabled(true);
+        v.setOverScrollMode(View.OVER_SCROLL_NEVER);
         v.addView(content);
         return v;
     }
@@ -1108,10 +1119,8 @@ public class MainActivity extends Activity {
     View logBody() {
         LinearLayout p = panel();
         final TextView lt = text("", 12, SUB, false);
-        lt.setTextIsSelectable(true);
         showLog(lt);
         ScrollView box = scroller(lt);
-        box.setOnTouchListener((v, e) -> { v.getParent().requestDisallowInterceptTouchEvent(true); return false; });
         p.addView(box);
         p.addView(buttonRow(
             pill("Refresh", BTN_DARK, TXT, v -> { showLog(lt); toast("Logs refreshed"); }),
