@@ -293,7 +293,6 @@ public class MainActivity extends Activity {
             @Override protected void onMeasure(int w, int h) {
                 super.onMeasure(w, View.MeasureSpec.makeMeasureSpec(max, View.MeasureSpec.AT_MOST));
             }
-            // Keep the outer page scroller from stealing vertical drags while this box can still scroll.
             @Override public boolean dispatchTouchEvent(MotionEvent e) {
                 int a = e.getActionMasked();
                 if (a == MotionEvent.ACTION_DOWN || a == MotionEvent.ACTION_MOVE) {

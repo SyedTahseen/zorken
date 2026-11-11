@@ -3,7 +3,7 @@ import android.content.Context;
 import android.content.SharedPreferences;
 import java.security.MessageDigest;
 public class Common {
-    public static final int MODULE_VER = 4;
+    public static final int MODULE_VER = 5;
     public static final String HEX64 = "[0-9a-f]{64}";
 
     public static SharedPreferences prefs(Context c) { return c.getSharedPreferences("zk", 0); }

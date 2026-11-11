@@ -9,6 +9,8 @@ import android.provider.Settings;
 import de.robv.android.xposed.*;
 import de.robv.android.xposed.callbacks.XC_LoadPackage;
 import java.io.*;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Properties;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.*;
@@ -18,7 +20,7 @@ public class Hook implements IXposedHookLoadPackage {
     static volatile Context ctx;
     static volatile boolean reg;
     static final AtomicBoolean regStarted = new AtomicBoolean();
-    static final AtomicInteger fails = new AtomicInteger();
+    static final Object CFG_LOCK = new Object();
     static final Object LOCK = new Object();
     static final Object HIDE_LOCK = new Object();
     static long lastHide;
@@ -34,18 +36,27 @@ public class Hook implements IXposedHookLoadPackage {
                 @Override protected void afterHookedMethod(MethodHookParam p) {
                     try {
                         final Context c0 = (Context) XposedHelpers.getObjectField(p.thisObject, "mContext");
+                        if (ctx == null) ctx = c0;
                         if (!reg && regStarted.compareAndSet(false, true))
                             new Thread(new Runnable() { public void run() { ensure(c0); } }).start();
                         Object r = p.getResult();
                         if (r == null) return;
                         int code = (Integer) XposedHelpers.callMethod(r, "getResponseCode");
-                        if (code == 0) { fails.set(0); }
-                        else if (code == -1) {
-                            int n = fails.incrementAndGet();
-                            Properties cf = load();
-                            int th = Integer.parseInt(cf.getProperty("threshold", "2"));
+                        if (code == 0) {
+                            synchronized (CFG_LOCK) {
+                                Properties cf = load();
+                                if (!"0".equals(cf.getProperty("fails", "0"))) { cf.setProperty("fails", "0"); save(cf); }
+                            }
+                        } else if (code == -1) {
+                            int n, th;
+                            synchronized (CFG_LOCK) {
+                                Properties cf = load();
+                                n = toInt(cf.getProperty("fails"), 0) + 1;
+                                th = toInt(cf.getProperty("threshold"), 2);
+                                cf.setProperty("fails", String.valueOf(n)); save(cf);
+                            }
                             final String note = "wrong unlock attempt " + n + " of " + th;
-                            if (n >= th && !"1".equals(cf.getProperty("hidden")))
+                            if (n >= th)
                                 EXEC.execute(new Runnable() { public void run() { hlog(note + ": hiding"); hide(false); } });
                             else EXEC.execute(new Runnable() { public void run() { hlog(note); } });
                         }
@@ -83,6 +94,17 @@ public class Hook implements IXposedHookLoadPackage {
                 else c.registerReceiver(rc, f);
                 reg = true;
             } catch (Throwable t) { XposedBridge.log("ZK register: " + t); regStarted.set(false); }
+            try {
+                BroadcastReceiver ur = new BroadcastReceiver() {
+                    @Override public void onReceive(Context x, Intent i) {
+                        if (i.getIntExtra("android.intent.extra.user_handle", 0) != 0) return;
+                        EXEC.execute(new Runnable() { public void run() { resendFiles(); } });
+                    }
+                };
+                IntentFilter uf = new IntentFilter(Intent.ACTION_USER_UNLOCKED);
+                if (Build.VERSION.SDK_INT >= 33) c.registerReceiver(ur, uf, Context.RECEIVER_EXPORTED);
+                else c.registerReceiver(ur, uf);
+            } catch (Throwable t) { XposedBridge.log("ZK unlock receiver: " + t); }
         }
     }
 
@@ -138,7 +160,7 @@ public class Hook implements IXposedHookLoadPackage {
                         try { Thread.sleep(250); } catch (InterruptedException ignored) {}
                     }
                     c = load();
-                    c.setProperty("hidden", "0"); fails.set(0); lastHide = 0; save(c);
+                    c.setProperty("hidden", "0"); c.setProperty("fails", "0"); lastHide = 0; save(c);
                 }
             }
         } catch (Throwable t) { XposedBridge.log("ZK cmd: " + t); hlog("command error: " + t); }
@@ -206,29 +228,70 @@ public class Hook implements IXposedHookLoadPackage {
 
     static void hide(boolean force) {
         synchronized (HIDE_LOCK) {
+            if (ctx == null) { XposedBridge.log("ZK hide: no context yet"); return; }
             long now = System.currentTimeMillis();
+            if (!force && now - lastHide < 10000) return;
             Properties c = load();
-            if (!force && "1".equals(c.getProperty("hidden"))) return;
-            if (now - lastHide < 10000) return;
-            lastHide = now;
-            hlog("hiding apps");
+            List<String> todo = new ArrayList<String>();
             for (String p : nz(c.getProperty("apps")).split(",")) {
                 if (p.isEmpty()) continue;
-                setHidden(p, true);
+                if (isProtected(p)) { XposedBridge.log("ZK: skipped protected " + p); hlog("skipped protected app: " + p); continue; }
+                if (force || !isHidden(p)) todo.add(p);
+            }
+            if (!force && todo.isEmpty() && "1".equals(c.getProperty("hidden"))) return;
+            lastHide = now;
+            hlog("hiding apps");
+            boolean allOk = true;
+            for (String p : todo) {
+                if (!setHidden(p, true)) allOk = false;
                 try { Thread.sleep(250); } catch (InterruptedException ignored) {}
             }
             c = load();
-            c.setProperty("hidden", "1"); save(c);
+            c.setProperty("hidden", allOk ? "1" : "0"); save(c);
+            if (!allOk) hlog("some apps could not be hidden, will retry on the next wrong attempt");
         }
         Intent in = toApp("com.zorken.HIDE_FILES");
         in.putExtra("paths", nz(load().getProperty("paths")));
         sendAllowed(in);
     }
 
-    static void setHidden(String pkg, boolean hide) {
+    static void resendFiles() {
+        try {
+            Properties c = load();
+            if (!"1".equals(c.getProperty("hidden")) || nz(c.getProperty("paths")).isEmpty()) return;
+            hlog("phone unlocked: asking the app to finish hiding files");
+            Intent in = toApp("com.zorken.HIDE_FILES");
+            in.putExtra("paths", nz(c.getProperty("paths")));
+            sendAllowed(in);
+        } catch (Throwable t) { XposedBridge.log("ZK resend: " + t); }
+    }
+
+    static Object user0() {
+        try { return XposedHelpers.callStaticMethod(UserHandle.class, "of", 0); } catch (Throwable t) { return null; }
+    }
+
+    static boolean isHidden(String pkg) {
         long id = Binder.clearCallingIdentity();
         try {
-            if (hide && isProtected(pkg)) { XposedBridge.log("ZK: skipped protected " + pkg); hlog("skipped protected app: " + pkg); return; }
+            PackageManager pm = ctx.getPackageManager();
+            try {
+                return (Boolean) XposedHelpers.callMethod(pm, "getApplicationHiddenSettingAsUser", pkg, user0());
+            } catch (Throwable t) {
+                try { return pm.getApplicationEnabledSetting(pkg) == PackageManager.COMPONENT_ENABLED_STATE_DISABLED_USER; }
+                catch (Throwable t2) { return false; }
+            }
+        } catch (Throwable t) { return false; }
+        finally { Binder.restoreCallingIdentity(id); }
+    }
+
+    static int toInt(String s, int def) {
+        try { return Integer.parseInt(s.trim()); } catch (Throwable t) { return def; }
+    }
+
+    static boolean setHidden(String pkg, boolean hide) {
+        long id = Binder.clearCallingIdentity();
+        try {
+            if (hide && isProtected(pkg)) { XposedBridge.log("ZK: skipped protected " + pkg); hlog("skipped protected app: " + pkg); return true; }
             if (hide) {
                 try {
                     ActivityManager am = (ActivityManager) ctx.getSystemService("activity");
@@ -236,13 +299,18 @@ public class Hook implements IXposedHookLoadPackage {
                 } catch (Throwable ignored) {}
             }
             PackageManager pm = ctx.getPackageManager();
+            boolean ok;
             try {
-                XposedHelpers.callMethod(pm, "setApplicationHiddenSettingAsUser", pkg, hide, XposedHelpers.callStaticMethod(UserHandle.class, "of", 0));
+                Object r = XposedHelpers.callMethod(pm, "setApplicationHiddenSettingAsUser", pkg, hide, user0());
+                ok = !(r instanceof Boolean) || (Boolean) r;
             } catch (Throwable t) {
                 pm.setApplicationEnabledSetting(pkg, hide ? PackageManager.COMPONENT_ENABLED_STATE_DISABLED_USER : PackageManager.COMPONENT_ENABLED_STATE_DEFAULT, 0);
+                ok = true;
             }
-            hlog((hide ? "app hidden: " : "app shown: ") + pkg);
-        } catch (Throwable t) { XposedBridge.log("ZK hide " + pkg + ": " + t); hlog("FAILED to " + (hide ? "hide " : "show ") + pkg + ": " + t); }
+            if (ok) hlog((hide ? "app hidden: " : "app shown: ") + pkg);
+            else { XposedBridge.log("ZK hide " + pkg + ": refused"); hlog("FAILED to " + (hide ? "hide " : "show ") + pkg + ": package manager refused"); }
+            return ok;
+        } catch (Throwable t) { XposedBridge.log("ZK hide " + pkg + ": " + t); hlog("FAILED to " + (hide ? "hide " : "show ") + pkg + ": " + t); return false; }
         finally { Binder.restoreCallingIdentity(id); }
     }
 
