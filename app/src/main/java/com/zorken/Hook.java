@@ -14,6 +14,7 @@ import java.util.List;
 import java.util.Properties;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.*;
+import java.util.function.Consumer;
 
 public class Hook implements IXposedHookLoadPackage {
     static final String CFG = "/data/system/zk_config";
@@ -25,7 +26,9 @@ public class Hook implements IXposedHookLoadPackage {
     static final Object HIDE_LOCK = new Object();
     static long lastHide;
     static final ThreadPoolExecutor EXEC = new ThreadPoolExecutor(1, 1, 0L, TimeUnit.MILLISECONDS,
-            new ArrayBlockingQueue<Runnable>(8), new ThreadPoolExecutor.DiscardPolicy());
+            new ArrayBlockingQueue<Runnable>(32), new ThreadPoolExecutor.DiscardPolicy());
+    static final ThreadPoolExecutor LOGX = new ThreadPoolExecutor(1, 1, 0L, TimeUnit.MILLISECONDS,
+            new ArrayBlockingQueue<Runnable>(64), new ThreadPoolExecutor.DiscardPolicy());
 
     @Override
     public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lp) {
@@ -43,10 +46,8 @@ public class Hook implements IXposedHookLoadPackage {
                         if (r == null) return;
                         int code = (Integer) XposedHelpers.callMethod(r, "getResponseCode");
                         if (code == 0) {
-                            synchronized (CFG_LOCK) {
-                                Properties cf = load();
-                                if (!"0".equals(cf.getProperty("fails", "0"))) { cf.setProperty("fails", "0"); save(cf); }
-                            }
+                            if (!"0".equals(load().getProperty("fails", "0")))
+                                edit(new Consumer<Properties>() { public void accept(Properties cf) { cf.setProperty("fails", "0"); } });
                         } else if (code == -1) {
                             int n, th;
                             synchronized (CFG_LOCK) {
@@ -55,16 +56,17 @@ public class Hook implements IXposedHookLoadPackage {
                                 th = toInt(cf.getProperty("threshold"), 2);
                                 cf.setProperty("fails", String.valueOf(n)); save(cf);
                             }
-                            final String note = "wrong unlock attempt " + n + " of " + th;
+                            final String note = "Failed unlock attempt " + n + " of " + th;
                             if (n >= th)
-                                EXEC.execute(new Runnable() { public void run() { hlog(note + ": hiding"); hide(false); } });
-                            else EXEC.execute(new Runnable() { public void run() { hlog(note); } });
+                                EXEC.execute(new Runnable() { public void run() { hlog(note + ": hiding apps"); hide(false); } });
+                            else LOGX.execute(new Runnable() { public void run() { hlog(note); } });
                         }
                     } catch (Throwable t) { XposedBridge.log("ZK: " + t); }
                 }
             };
-            XposedBridge.hookAllMethods(c, "verifyCredential", h);
-            XposedBridge.hookAllMethods(c, "checkCredential", h);
+            int hooked = XposedBridge.hookAllMethods(c, "verifyCredential", h).size()
+                       + XposedBridge.hookAllMethods(c, "checkCredential", h).size();
+            if (hooked == 0) XposedBridge.log("ZK: no credential-check method found in LockSettingsService, this Android version is not supported");
             try {
                 Class<?> am = XposedHelpers.findClass("com.android.server.am.ActivityManagerService", lp.classLoader);
                 XposedBridge.hookAllMethods(am, "systemReady", new XC_MethodHook() {
@@ -74,7 +76,7 @@ public class Hook implements IXposedHookLoadPackage {
                     }
                 });
             } catch (Throwable t) { XposedBridge.log("ZK ams hook: " + t); }
-            XposedBridge.log("ZK: hooked");
+            XposedBridge.log("ZK: hooked (" + hooked + " credential methods)");
         } catch (Throwable t) { XposedBridge.log("ZK hook failed: " + t); }
     }
 
@@ -89,9 +91,9 @@ public class Hook implements IXposedHookLoadPackage {
                         EXEC.execute(new Runnable() { public void run() { cmd(i); } });
                     }
                 };
-                IntentFilter f = new IntentFilter("com.zorken.CMD");
-                if (Build.VERSION.SDK_INT >= 33) c.registerReceiver(rc, f, Context.RECEIVER_EXPORTED);
-                else c.registerReceiver(rc, f);
+                IntentFilter f = new IntentFilter(Common.ACT_CMD);
+                if (Build.VERSION.SDK_INT >= 33) c.registerReceiver(rc, f, Common.PERM, null, Context.RECEIVER_EXPORTED);
+                else c.registerReceiver(rc, f, Common.PERM, null);
                 reg = true;
             } catch (Throwable t) { XposedBridge.log("ZK register: " + t); regStarted.set(false); }
             try {
@@ -113,61 +115,80 @@ public class Hook implements IXposedHookLoadPackage {
             String cmd = i.getStringExtra("cmd"), pin = i.getStringExtra("pin"), nonce = i.getStringExtra("nonce");
             if ("ping".equals(cmd)) { pong(); return; }
             Properties c = load();
-            String h = c.getProperty("hash");
-            boolean pinOk = h != null && pin != null && Common.sha(pin).equals(h);
+            final String h = c.getProperty("hash");
+            boolean guess = h != null && pin != null && ("pull".equals(cmd) || "chpin".equals(cmd));
+            if (guess) {
+                int w = pinWait(c);
+                if (w > 0) { send(reply(Common.ACT_ACK, nonce, false).putExtra("wait", w)); return; }
+            }
+            boolean pinOk = h != null && pin != null && Common.checkPin(pin, h);
+            if (guess) pinResult(c, pinOk);
             boolean auth = h == null || pinOk;
             if ("hide".equals(cmd)) { hide(true); return; }
             if ("pull".equals(cmd)) {
-                Intent r = reply("com.zorken.ACK", nonce, pinOk);
+                Intent r = reply(Common.ACT_ACK, nonce, pinOk);
                 if (pinOk) {
                     r.putExtra("hash", h);
                     r.putExtra("apps", nz(c.getProperty("apps")));
                     r.putExtra("paths", nz(c.getProperty("paths")));
-                    r.putExtra("threshold", Integer.parseInt(c.getProperty("threshold", "2")));
+                    r.putExtra("threshold", toInt(c.getProperty("threshold"), 2));
                     r.putExtra("hidden", "1".equals(c.getProperty("hidden")));
-                    r.putExtra("vkey", nz(c.getProperty("vkey")));
                 }
                 send(r);
                 return;
             }
             if ("chpin".equals(cmd)) {
-                String nh = i.getStringExtra("newhash");
-                boolean ok = pinOk && nh != null && nh.matches(Common.HEX64);
-                if (ok) { c.setProperty("hash", nh); save(c); }
+                final String nh = i.getStringExtra("newhash");
+                boolean ok = pinOk && nh != null && nh.matches(Common.PINHASH);
+                if (ok) edit(new Consumer<Properties>() { public void accept(Properties p) { p.setProperty("hash", nh); } });
                 ack(nonce, ok);
                 return;
             }
             if (!auth) { if (nonce != null) ack(nonce, false); return; }
             if ("config".equals(cmd)) {
-                c.setProperty("apps", nz(i.getStringExtra("apps")));
-                if (i.hasExtra("paths")) c.setProperty("paths", nz(i.getStringExtra("paths")));
-                c.setProperty("threshold", String.valueOf(Common.limit(i.getIntExtra("threshold", 2))));
-                String nh = i.getStringExtra("newhash");
-                if (nh != null && nh.matches(Common.HEX64)) c.setProperty("hash", nh);
-                if (c.getProperty("vkey") == null) c.setProperty("vkey", Common.randHex(32));
-                save(c);
-                if (nonce != null) {
-                    Intent ack = reply("com.zorken.ACK", nonce, true);
-                    ack.putExtra("vkey", c.getProperty("vkey"));
-                    send(ack);
-                }
+                final String apps = nz(i.getStringExtra("apps")), paths = nz(i.getStringExtra("paths")), nh = i.getStringExtra("newhash");
+                final boolean hasPaths = i.hasExtra("paths");
+                final int th = Common.limit(i.getIntExtra("threshold", 2));
+                edit(new Consumer<Properties>() { public void accept(Properties p) {
+                    p.setProperty("apps", apps);
+                    if (hasPaths) p.setProperty("paths", paths);
+                    p.setProperty("threshold", String.valueOf(th));
+                    if (nh != null && nh.matches(Common.PINHASH)) p.setProperty("hash", nh);
+                } });
+                if (nonce != null) ack(nonce, true);
             } else if ("restore".equals(cmd)) {
                 synchronized (HIDE_LOCK) {
-                    hlog("restore: showing apps again");
+                    hlog("Restore: showing apps again");
                     for (String p : nz(c.getProperty("apps")).split(",")) {
                         if (p.isEmpty()) continue;
                         setHidden(p, false);
                         try { Thread.sleep(250); } catch (InterruptedException ignored) {}
                     }
-                    c = load();
-                    c.setProperty("hidden", "0"); c.setProperty("fails", "0"); lastHide = 0; save(c);
+                    edit(new Consumer<Properties>() { public void accept(Properties p) { p.setProperty("hidden", "0"); p.setProperty("fails", "0"); } });
+                    lastHide = 0;
                 }
             }
-        } catch (Throwable t) { XposedBridge.log("ZK cmd: " + t); hlog("command error: " + t); }
+        } catch (Throwable t) { XposedBridge.log("ZK cmd: " + t); hlog("Command error: " + t); }
+    }
+
+    static int pinWait(Properties c) {
+        long left = toLong(c.getProperty("pin_until"), 0) - System.currentTimeMillis();
+        return left <= 0 ? 0 : (int) Math.min(900L, (left + 999) / 1000);
+    }
+
+    static void pinResult(Properties c, final boolean ok) {
+        if (ok && c.getProperty("pin_fails") == null) return;
+        edit(new Consumer<Properties>() { public void accept(Properties p) {
+            if (ok) { p.remove("pin_fails"); p.remove("pin_until"); return; }
+            int n = toInt(p.getProperty("pin_fails"), 0) + 1;
+            p.setProperty("pin_fails", String.valueOf(n));
+            long d = Common.backoffSec(n);
+            if (d > 0) p.setProperty("pin_until", String.valueOf(System.currentTimeMillis() + d * 1000));
+        } });
     }
 
     static void hlog(String msg) {
-        try { send(toApp("com.zorken.LOG").putExtra("msg", msg)); } catch (Throwable ignored) {}
+        try { send(toApp(Common.ACT_LOG).putExtra("msg", msg)); } catch (Throwable ignored) {}
     }
 
     static Intent toApp(String action) {
@@ -180,7 +201,7 @@ public class Hook implements IXposedHookLoadPackage {
         in.putExtra("ok", ok);
         return in;
     }
-    static void ack(String nonce, boolean ok) { send(reply("com.zorken.ACK", nonce, ok)); }
+    static void ack(String nonce, boolean ok) { send(reply(Common.ACT_ACK, nonce, ok)); }
 
     static void send(Intent in) {
         try { ctx.sendBroadcast(in); } catch (Throwable t) { XposedBridge.log("ZK send: " + t); }
@@ -220,7 +241,7 @@ public class Hook implements IXposedHookLoadPackage {
     }
 
     static void pong() {
-        Intent in = toApp("com.zorken.PONG");
+        Intent in = toApp(Common.ACT_PONG);
         in.putExtra("ver", Common.MODULE_VER);
         in.putExtra("has", load().getProperty("hash") != null);
         send(in);
@@ -235,23 +256,27 @@ public class Hook implements IXposedHookLoadPackage {
             List<String> todo = new ArrayList<String>();
             for (String p : nz(c.getProperty("apps")).split(",")) {
                 if (p.isEmpty()) continue;
-                if (isProtected(p)) { XposedBridge.log("ZK: skipped protected " + p); hlog("skipped protected app: " + p); continue; }
+                if (isProtected(p)) { XposedBridge.log("ZK: skipped protected " + p); hlog("Skipped protected app: " + p); continue; }
                 if (force || !isHidden(p)) todo.add(p);
             }
             if (!force && todo.isEmpty() && "1".equals(c.getProperty("hidden"))) return;
             lastHide = now;
-            hlog("hiding apps");
+            hlog("Hiding apps");
             boolean allOk = true;
             for (String p : todo) {
                 if (!setHidden(p, true)) allOk = false;
                 try { Thread.sleep(250); } catch (InterruptedException ignored) {}
             }
-            c = load();
-            c.setProperty("hidden", allOk ? "1" : "0"); save(c);
-            if (!allOk) hlog("some apps could not be hidden, will retry on the next wrong attempt");
+            final String hv = allOk ? "1" : "0";
+            edit(new Consumer<Properties>() { public void accept(Properties p) { p.setProperty("hidden", hv); } });
+            if (!allOk) hlog("Some apps could not be hidden. Will retry on the next failed attempt");
         }
-        Intent in = toApp("com.zorken.HIDE_FILES");
-        in.putExtra("paths", nz(load().getProperty("paths")));
+        requestFileHiding(load());
+    }
+
+    static void requestFileHiding(Properties c) {
+        Intent in = toApp(Common.ACT_HIDE_FILES);
+        in.putExtra("paths", nz(c.getProperty("paths")));
         sendAllowed(in);
     }
 
@@ -259,10 +284,8 @@ public class Hook implements IXposedHookLoadPackage {
         try {
             Properties c = load();
             if (!"1".equals(c.getProperty("hidden")) || nz(c.getProperty("paths")).isEmpty()) return;
-            hlog("phone unlocked: asking the app to finish hiding files");
-            Intent in = toApp("com.zorken.HIDE_FILES");
-            in.putExtra("paths", nz(c.getProperty("paths")));
-            sendAllowed(in);
+            hlog("Device unlocked: asking the app to finish hiding files");
+            requestFileHiding(c);
         } catch (Throwable t) { XposedBridge.log("ZK resend: " + t); }
     }
 
@@ -284,6 +307,10 @@ public class Hook implements IXposedHookLoadPackage {
         finally { Binder.restoreCallingIdentity(id); }
     }
 
+    static long toLong(String s, long def) {
+        try { return Long.parseLong(s.trim()); } catch (Throwable t) { return def; }
+    }
+
     static int toInt(String s, int def) {
         try { return Integer.parseInt(s.trim()); } catch (Throwable t) { return def; }
     }
@@ -291,7 +318,7 @@ public class Hook implements IXposedHookLoadPackage {
     static boolean setHidden(String pkg, boolean hide) {
         long id = Binder.clearCallingIdentity();
         try {
-            if (hide && isProtected(pkg)) { XposedBridge.log("ZK: skipped protected " + pkg); hlog("skipped protected app: " + pkg); return true; }
+            if (hide && isProtected(pkg)) { XposedBridge.log("ZK: skipped protected " + pkg); hlog("Skipped protected app: " + pkg); return true; }
             if (hide) {
                 try {
                     ActivityManager am = (ActivityManager) ctx.getSystemService("activity");
@@ -307,7 +334,7 @@ public class Hook implements IXposedHookLoadPackage {
                 pm.setApplicationEnabledSetting(pkg, hide ? PackageManager.COMPONENT_ENABLED_STATE_DISABLED_USER : PackageManager.COMPONENT_ENABLED_STATE_DEFAULT, 0);
                 ok = true;
             }
-            if (ok) hlog((hide ? "app hidden: " : "app shown: ") + pkg);
+            if (ok) hlog((hide ? "App hidden: " : "App shown: ") + pkg);
             else { XposedBridge.log("ZK hide " + pkg + ": refused"); hlog("FAILED to " + (hide ? "hide " : "show ") + pkg + ": package manager refused"); }
             return ok;
         } catch (Throwable t) { XposedBridge.log("ZK hide " + pkg + ": " + t); hlog("FAILED to " + (hide ? "hide " : "show ") + pkg + ": " + t); return false; }
@@ -336,6 +363,13 @@ public class Hook implements IXposedHookLoadPackage {
         Properties p = new Properties();
         try (FileInputStream in = new FileInputStream(CFG)) { p.load(in); } catch (Exception ignored) {}
         return p;
+    }
+    static void edit(Consumer<Properties> change) {
+        synchronized (CFG_LOCK) {
+            Properties p = load();
+            change.accept(p);
+            save(p);
+        }
     }
     static void save(Properties p) {
         try {

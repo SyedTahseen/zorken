@@ -2,6 +2,7 @@ package com.zorken;
 
 import android.content.Context;
 import java.io.*;
+import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.Locale;
@@ -24,7 +25,7 @@ public class AppLog {
                     sb.append(ts).append(" [").append(tag).append("] ").append(line).append('\n');
                 }
                 if (sb.length() == 0) return;
-                try (FileOutputStream o = new FileOutputStream(f, true)) { o.write(sb.toString().getBytes("UTF-8")); }
+                try (FileOutputStream o = new FileOutputStream(f, true)) { o.write(sb.toString().getBytes(StandardCharsets.UTF_8)); }
             }
         } catch (Throwable ignored) {}
     }
@@ -33,8 +34,8 @@ public class AppLog {
         try {
             synchronized (LOCK) {
                 File f = new File(c.getApplicationContext().getFilesDir(), FILE);
-                byte[] b = Shell.readAll(f);
-                return b == null ? "" : new String(b, "UTF-8");
+                byte[] b = readAll(f);
+                return b == null ? "" : new String(b, StandardCharsets.UTF_8);
             }
         } catch (Throwable t) { return ""; }
     }
@@ -43,9 +44,18 @@ public class AppLog {
         synchronized (LOCK) { new File(c.getApplicationContext().getFilesDir(), FILE).delete(); }
     }
 
+    private static byte[] readAll(File f) {
+        try (FileInputStream in = new FileInputStream(f)) {
+            ByteArrayOutputStream o = new ByteArrayOutputStream();
+            byte[] b = new byte[4096]; int n;
+            while ((n = in.read(b)) > 0) o.write(b, 0, n);
+            return o.toByteArray();
+        } catch (Exception e) { return null; }
+    }
+
     private static void trim(File f) {
         try {
-            byte[] b = Shell.readAll(f);
+            byte[] b = readAll(f);
             if (b == null || b.length <= KEEP) return;
             int from = b.length - (int) KEEP;
             while (from < b.length && b[from] != '\n') from++;

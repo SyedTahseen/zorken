@@ -11,9 +11,9 @@ import javax.crypto.spec.*;
 
 public final class Vault {
     static final int CHUNK = 1 << 20;
-    static final int ITER = 300000;
-    static final byte[] KMAGIC = {'Z', 'K', 'K', '1'};
-    static final byte[] FMAGIC = {'Z', 'K', 'E', '1'};
+    static final int ITER = 600000;
+    static final byte[] KMAGIC2 = {'Z', 'K', 'K', '2'};
+    static final byte[] FMAGIC2 = {'Z', 'K', 'E', '2'};
     static final SecureRandom RND = new SecureRandom();
 
     public static class Stopped extends IOException { Stopped() { super("stopped"); } }
@@ -24,12 +24,6 @@ public final class Vault {
     private static void report(long n) { java.util.function.LongConsumer p = PROGRESS; if (p != null && n > 0) p.accept(n); }
 
     private Vault() {}
-
-    static byte[] pbkdf(char[] pin, byte[] salt, int iter) throws GeneralSecurityException {
-        PBEKeySpec spec = new PBEKeySpec(pin, salt, iter, 256);
-        try { return SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256").generateSecret(spec).getEncoded(); }
-        finally { spec.clearPassword(); }
-    }
 
     static byte[] hmac(byte[] key, byte[]... parts) throws GeneralSecurityException {
         Mac m = Mac.getInstance("HmacSHA256");
@@ -45,16 +39,16 @@ public final class Vault {
     }
 
     private static final class Bundle {
-        boolean vk; int iter; byte[] salt, pub, head, iv, ct;
+        int iter; byte[] salt, pub, head, iv, ct;
     }
 
     private static Bundle parse(byte[] b) throws IOException {
         DataInputStream d = new DataInputStream(new ByteArrayInputStream(b));
         byte[] m = new byte[4];
         d.readFully(m);
-        if (!Arrays.equals(m, KMAGIC)) throw new IOException("not a key bundle");
+        if (!Arrays.equals(m, KMAGIC2)) throw new IOException("not a key bundle");
         Bundle x = new Bundle();
-        x.vk = d.readUnsignedByte() == 1;
+        d.readUnsignedByte();
         x.iter = d.readInt();
         if (x.iter < 1000 || x.iter > 10000000) throw new IOException("bad key bundle");
         x.salt = new byte[16];
@@ -70,21 +64,20 @@ public final class Vault {
         return x;
     }
 
-    private static byte[] seal(byte[] pub, byte[] privPkcs8, char[] pin, byte[] vkey) throws GeneralSecurityException, IOException {
+    private static byte[] seal(byte[] pub, byte[] privPkcs8, char[] pin) throws GeneralSecurityException, IOException {
         byte[] salt = new byte[16], iv = new byte[12];
         RND.nextBytes(salt);
         RND.nextBytes(iv);
         ByteArrayOutputStream bo = new ByteArrayOutputStream();
         DataOutputStream d = new DataOutputStream(bo);
-        d.write(KMAGIC);
-        d.writeByte(vkey != null ? 1 : 0);
+        d.write(KMAGIC2);
+        d.writeByte(0);
         d.writeInt(ITER);
         d.write(salt);
         d.writeShort(pub.length);
         d.write(pub);
         byte[] head = bo.toByteArray();
-        byte[] k = pbkdf(pin, salt, ITER);
-        if (vkey != null) k = hmac(vkey, k);
+        byte[] k = Common.pbkdf2(pin, salt, ITER);
         Cipher c = gcm(Cipher.ENCRYPT_MODE, k, iv);
         c.updateAAD(head);
         byte[] ct = c.doFinal(privPkcs8);
@@ -95,38 +88,32 @@ public final class Vault {
         return bo.toByteArray();
     }
 
-    public static byte[] newBundle(char[] pin, byte[] vkey) throws GeneralSecurityException, IOException {
+    public static byte[] newBundle(char[] pin) throws GeneralSecurityException, IOException {
         KeyPairGenerator g = KeyPairGenerator.getInstance("EC");
         g.initialize(new ECGenParameterSpec("secp256r1"));
         KeyPair kp = g.generateKeyPair();
-        return seal(kp.getPublic().getEncoded(), kp.getPrivate().getEncoded(), pin, vkey);
-    }
-
-    public static boolean usesVkey(byte[] bundle) {
-        try { return parse(bundle).vk; } catch (IOException e) { return false; }
+        return seal(kp.getPublic().getEncoded(), kp.getPrivate().getEncoded(), pin);
     }
 
     public static PublicKey publicKey(byte[] bundle) throws GeneralSecurityException, IOException {
         return KeyFactory.getInstance("EC").generatePublic(new X509EncodedKeySpec(parse(bundle).pub));
     }
 
-    private static byte[] privateBytes(byte[] bundle, char[] pin, byte[] vkey) throws GeneralSecurityException, IOException {
+    private static byte[] privateBytes(byte[] bundle, char[] pin) throws GeneralSecurityException, IOException {
         Bundle x = parse(bundle);
-        if (x.vk && vkey == null) throw new IllegalStateException("module key missing");
-        byte[] k = pbkdf(pin, x.salt, x.iter);
-        if (x.vk) k = hmac(vkey, k);
+        byte[] k = Common.pbkdf2(pin, x.salt, x.iter);
         Cipher c = gcm(Cipher.DECRYPT_MODE, k, x.iv);
         c.updateAAD(x.head);
         return c.doFinal(x.ct);
     }
 
-    public static PrivateKey unlock(byte[] bundle, char[] pin, byte[] vkey) throws GeneralSecurityException, IOException {
-        return KeyFactory.getInstance("EC").generatePrivate(new PKCS8EncodedKeySpec(privateBytes(bundle, pin, vkey)));
+    public static PrivateKey unlock(byte[] bundle, char[] pin) throws GeneralSecurityException, IOException {
+        return KeyFactory.getInstance("EC").generatePrivate(new PKCS8EncodedKeySpec(privateBytes(bundle, pin)));
     }
 
-    public static byte[] rewrap(byte[] bundle, char[] oldPin, char[] newPin, byte[] vkey) throws GeneralSecurityException, IOException {
-        byte[] raw = privateBytes(bundle, oldPin, vkey);
-        return seal(parse(bundle).pub, raw, newPin, vkey);
+    public static byte[] reseal(byte[] bundle, char[] oldSecret, char[] newSecret) throws GeneralSecurityException, IOException {
+        byte[] raw = privateBytes(bundle, oldSecret);
+        return seal(parse(bundle).pub, raw, newSecret);
     }
 
     private static byte[] itemKey(PrivateKey mine, PublicKey theirs, byte[] ephPubEnc) throws GeneralSecurityException {
@@ -262,6 +249,13 @@ public final class Vault {
         }
     }
 
+    private static File checkedDest(String parent) throws IOException {
+        if (parent.isEmpty() || parent.indexOf('\0') >= 0 || Shell.resolve(parent + "/x") == null) throw new IOException("bad destination in container");
+        File f = new File(parent);
+        if (!f.isDirectory() && !f.mkdirs()) throw new IOException("cannot create " + f);
+        return f;
+    }
+
     private static File target(File dst, String name) throws IOException {
         if (name.isEmpty() || name.startsWith("/") || name.indexOf('\0') >= 0) throw new IOException("bad name in container");
         for (String s : name.split("/", -1)) if (s.isEmpty() || s.equals(".") || s.equals("..")) throw new IOException("bad name in container");
@@ -270,13 +264,15 @@ public final class Vault {
         return f;
     }
 
-    private static Counts read(File container, PrivateKey priv, byte[] knownKey, File dst, BooleanSupplier stop) throws Exception {
+    private static Counts read(File container, PrivateKey priv, byte[] knownKey, File dst, boolean useMeta, BooleanSupplier stop) throws Exception {
         Counts cnt = new Counts();
+        boolean metaSeen = false;
         try (InputStream raw = new BufferedInputStream(new FileInputStream(container), 1 << 16)) {
             DataInputStream h = new DataInputStream(raw);
             byte[] m = new byte[4];
             h.readFully(m);
-            if (!Arrays.equals(m, FMAGIC)) throw new IOException("not a Zorken container");
+            if (!Arrays.equals(m, FMAGIC2)) throw new IOException("not a Zorken container");
+            h.readFully(new byte[h.readUnsignedShort()]);
             byte[] eph = new byte[h.readUnsignedShort()];
             h.readFully(eph);
             byte[] key = knownKey != null ? knownKey
@@ -325,14 +321,19 @@ public final class Vault {
                         if (o != null) try { o.close(); } catch (IOException ignored) {}
                         if (tmp != null) tmp.delete();
                     }
+                } else if (t == 3) {
+                    metaSeen = true;
+                    if (useMeta) dst = checkedDest(name);
                 } else throw new IOException("corrupt container");
             }
             if (d.read() != -1) throw new IOException("unexpected data after container end");
+            if (useMeta && !metaSeen) throw new IOException("container has no destination");
         }
         return cnt;
     }
 
-    public static void encrypt(java.util.List<Entry> entries, File outTmp, PublicKey recipient, BooleanSupplier stop) throws Exception {
+    public static void encrypt(java.util.List<Entry> entries, File outTmp, byte[] bundle, String destParent, BooleanSupplier stop) throws Exception {
+        PublicKey recipient = publicKey(bundle);
         KeyPairGenerator g = KeyPairGenerator.getInstance("EC");
         g.initialize(new ECGenParameterSpec("secp256r1"));
         KeyPair eph = g.generateKeyPair();
@@ -343,21 +344,55 @@ public final class Vault {
         try {
             BufferedOutputStream bo = new BufferedOutputStream(fos, 1 << 18);
             DataOutputStream h = new DataOutputStream(bo);
-            h.write(FMAGIC);
+            h.write(FMAGIC2);
+            h.writeShort(bundle.length);
+            h.write(bundle);
             h.writeShort(ephPub.length);
             h.write(ephPub);
             DataOutputStream d = new DataOutputStream(new ChunkOut(bo, key));
+            d.writeByte(3); writeName(d, destParent);
             for (Entry e : entries) writeEntry(d, e, w, stop);
             d.writeByte(0);
             d.close();
             bo.flush();
             fos.getFD().sync();
         } finally { fos.close(); }
-        Counts r = read(outTmp, null, key, null, stop);
+        Counts r = read(outTmp, null, key, null, false, stop);
         if (r.files != w.files || r.dirs != w.dirs || r.bytes != w.bytes) throw new IOException("verification mismatch");
     }
 
-    public static long extract(File container, PrivateKey priv, File dstParent, BooleanSupplier stop) throws Exception {
-        return read(container, priv, null, dstParent, stop).skipped;
+    public static long extractAuto(File container, PrivateKey priv, BooleanSupplier stop) throws Exception {
+        return read(container, priv, null, null, true, stop).skipped;
+    }
+
+    public static boolean isContainer(File f) {
+        try (InputStream in = new FileInputStream(f)) {
+            byte[] m = new byte[4];
+            return new DataInputStream(in).read(m) == 4 && Arrays.equals(m, FMAGIC2);
+        } catch (IOException e) { return false; }
+    }
+
+    public static byte[] embeddedBundle(File f) {
+        try (DataInputStream d = new DataInputStream(new FileInputStream(f))) {
+            byte[] m = new byte[4];
+            d.readFully(m);
+            if (!Arrays.equals(m, FMAGIC2)) return null;
+            int len = d.readUnsignedShort();
+            if (len < 40) return null;
+            byte[] b = new byte[len];
+            d.readFully(b);
+            return b;
+        } catch (IOException e) { return null; }
+    }
+
+    public static boolean rewriteHeader(File f, byte[] bundle) {
+        try (RandomAccessFile r = new RandomAccessFile(f, "rw")) {
+            byte[] m = new byte[4];
+            r.readFully(m);
+            if (!Arrays.equals(m, FMAGIC2) || r.readUnsignedShort() != bundle.length) return false;
+            r.write(bundle);
+            r.getFD().sync();
+            return true;
+        } catch (IOException e) { return false; }
     }
 }

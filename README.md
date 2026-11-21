@@ -6,7 +6,7 @@
   <a href="https://github.com/syedtahseen/zorken/releases/tag/latest"><img src="https://img.shields.io/badge/Download-APK-D2F234?style=for-the-badge&labelColor=000000" alt="Download APK"></a>
   <img src="https://img.shields.io/badge/Android-11%2B-D2F234?style=for-the-badge&labelColor=000000" alt="Android 11+">
   <img src="https://img.shields.io/badge/Needs-LSPosed-D2F234?style=for-the-badge&labelColor=000000" alt="Needs LSPosed">
-  <img src="https://img.shields.io/badge/Version-1.0.0-D2F234?style=for-the-badge&labelColor=000000" alt="Version 1.0.0">
+  <img src="https://img.shields.io/badge/Version-1.1.0-D2F234?style=for-the-badge&labelColor=000000" alt="Version 1.1.0">
 </p>
 
 ## What is Zorken?
@@ -25,7 +25,8 @@ You choose how many wrong unlock attempts are allowed. If someone goes over the 
 |---|---|
 | **Hide apps** | Pick any apps. They disappear from your phone when the limit is reached. |
 | **Lock files and folders** | Chosen items are moved into a hidden vault and encrypted. |
-| **Secret PIN** | A separate PIN, different from your phone lock, is the only way to restore. |
+| **Secret PIN** | A separate PIN, different from your phone lock, opens the app and authorises changes. |
+| **Vault password** | Locked files are encrypted with a separate password. Each locked file carries its own key, so it restores even if you rename it or reinstall the app. |
 | **Safe by design** | A correct phone unlock never restores anything. Hiding needs no PIN, restoring does. |
 | **Your limit** | Choose 1 to 10 wrong attempts before Zorken acts. |
 | **Swipe to hide or restore** | One swipe, with live progress in the app and in a notification. |
@@ -36,19 +37,20 @@ You choose how many wrong unlock attempts are allowed. If someone goes over the 
 
 1. **Download** the APK from [Releases](https://github.com/syedtahseen/zorken/releases/tag/latest) and install it.
 2. Open **LSPosed**, enable the **Zorken** module with scope **System Framework**, then **reboot**.
-3. Open Zorken and **create your PIN**.
-4. Choose your **apps** and **folders or files**, and set your **wrong attempts** limit.
+3. Open Zorken, **create your PIN**, then **set your vault password** (required, at least 8 characters). You can change it later in Settings, Vault password.
+4. Choose your **apps** and **folders or files**, and set your **failed attempts** limit.
 5. Allow **All files access** and **notifications** when asked.
 
 Tip: turn off battery optimization for Zorken so locking is never interrupted.
 
 ## Good to know
 
-- **There is no PIN recovery.** Files that are already locked cannot be opened without your PIN, so remember it.
+- **There is no password recovery.** Locked files cannot be opened without your vault password, so remember it.
+- **Restoring files.** Use the swipe button on the home screen to restore everything, or **Decrypt** on a single item under Encrypted files. Locked files carry their own key, so they can be restored after a reinstall.
 - **Something wrong?** The status card on the home screen tells you what to fix, and the **Logs** section shows what happened.
 - **App icon hidden?** Open Zorken from LSPosed, then Modules, then Zorken.
 - **After an update,** reboot once if the status card says the module is an older version.
 
 ## Found a bug?
 
-Open the menu in the app and tap **Bug report**, or [create an issue](https://github.com/syedtahseen/zorken/issues/new).
+Open the menu in the app and tap **Report a bug**, or [create an issue](https://github.com/syedtahseen/zorken/issues/new).
